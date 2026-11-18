@@ -17,10 +17,19 @@ import sys
 import os
 import json
 import time
+import hashlib
 import threading
 import requests
 from flask import Flask, request, Response, jsonify
 import urllib.parse
+
+# Windows 控制台/管道默认 GBK，日志里的 emoji 会触发 UnicodeEncodeError
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 # Add parent directory for cache_pool import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -209,15 +218,44 @@ def build_response_from_cache(cached: dict, original_body: dict) -> tuple:
     
     return jsonify(cached_response), 200, {"X-Cache": str(cached["match_type"])}
 
+def _header(headers: dict, name: str, default: str = "") -> str:
+    """Case-insensitive header lookup (dict(request.headers) keeps client casing)."""
+    lowered = name.lower()
+    for k, v in headers.items():
+        if k.lower() == lowered:
+            return v
+    return default
+
+def build_forward_headers(headers: dict, body: dict) -> dict:
+    """
+    构造转发到上游的请求头。
+
+    OpenCode Go 要求稳定的 x-opencode-session 和非通用 User-Agent，
+    否则会返回 MissingSessionID；其余 x-opencode-* 头原样透传。
+    """
+    auth = _header(headers, "Authorization") or f"Bearer {deepseek_api_key}"
+    forward = {
+        "Content-Type": "application/json",
+        "Authorization": auth,
+        "User-Agent": _header(headers, "User-Agent", "yachiyo-cache-pool/1.0"),
+    }
+    for k, v in headers.items():
+        if k.lower().startswith("x-opencode-"):
+            forward[k] = v
+
+    if not any(k.lower() == "x-opencode-session" for k in forward):
+        query = extract_last_user_message(body.get("messages", []))
+        forward["x-opencode-session"] = "yachiyo-" + hashlib.sha256(
+            query.encode("utf-8")
+        ).hexdigest()[:16]
+    return forward
+
 def forward_to_deepseek(headers: dict, body: dict) -> Response:
     """Forward the request to actual upstream API and return response."""
     target_url = f"{DEEPSEEK_BASE_URL}/chat/completions"
-    
+
     # Forward the request
-    forward_headers = {
-        "Content-Type": "application/json",
-        "Authorization": headers.get("Authorization", f"Bearer {deepseek_api_key}"),
-    }
+    forward_headers = build_forward_headers(headers, body)
     
     try:
         resp = requests.post(
@@ -708,7 +746,7 @@ def run():
     log(f"   💾 缓存: {cp.DB_PATH}")
     log(f"   ⚙️ 配置: {config_path}")
     if cp.USE_LLAMA_SERVER_DIRECT:
-        log(f"   🧠 Embedding: llama.cpp server ({cp.LLAMA_SERVER_URL}, Q8_0)")
+        log(f"   🧠 Embedding: llama.cpp server ({cp.LLAMA_SERVER_URL}, {cp.EMBED_ID})")
     else:
         log(f"   🧠 Embedding: {cp.EMBED_MODEL} (Ollama)")
     log(f"   🎯 相似度阈值: {cp.SIMILARITY_THRESHOLD}")

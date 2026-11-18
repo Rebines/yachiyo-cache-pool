@@ -10,6 +10,33 @@ embedding:
   # Ollama 地址（backend=ollama 时生效）
   ollama_url: "http://localhost:11434/api/embeddings"
   ollama_model: "embeddinggemma:300m-qat-q4_0"
+  # 发给 llama-server 的 model 名（多数情况下服务端不校验，填不填都行）
+  llama_model: "embeddinggemma"
+  # 加速器: auto = 自动检测 NVIDIA GPU（有则用 CUDA 版 llama.cpp）/ cpu / cuda
+  accelerator: "auto"
+  # CUDA 构建版本: auto = 按驱动版本和显卡计算能力自动选 / 12 / 13
+  cuda_build: "auto"
+
+  # --- 自定义 GGUF 模型（留空则用默认 embeddinggemma-300M-Q8_0）---
+  # 二选一，model_path 优先于 hf_repo：
+  # 本地 GGUF 路径：支持绝对路径、~ 开头、相对本仓库根目录的路径
+  # Windows 路径也可以直接写 "D:/models/xxx.gguf"
+  model_path: ""
+  # HuggingFace 仓库 ID，例如 "Qwen/Qwen3-Embedding-0.6B-GGUF"
+  # 启动时自动查询文件列表并下载到 models/（已有同名文件则跳过）
+  hf_repo: ""
+  # 仓库内具体文件名，留空自动挑（Q8_0 > Q6_K > Q5_K_M > Q4_K_M > 第一个）
+  hf_file: ""
+  # 私有/受限仓库的 token，也可用环境变量 HF_TOKEN
+  hf_token: ""
+  # 下载镜像地址，默认 https://huggingface.co（国内可用 https://hf-mirror.com）
+  hf_endpoint: ""
+  # 池化方式: mean / cls / last / rank / auto
+  #   auto = 不传 --pooling，由 llama-server 按模型自带配置决定（embeddinggemma 即 mean）
+  #   若模型没写默认值，请手动指定：Qwen3-Embedding 系列用 last
+  pooling: "auto"
+  # 向量归一化: 2 = L2 归一化（-1 不归一化），余弦相似度保持 2 即可
+  embd_normalize: 2
 
 # === 缓存策略 ===
 cache:
@@ -21,8 +48,8 @@ cache:
 
 # === 代理服务 ===
 proxy:
-  host: "0.0.0.0"
-  port: 18791
+  host: "127.0.0.1"
+  port: 18888
   # 是否缓存非流式请求
   cache_non_streaming: true
   # 是否缓存流式请求（一般不建议）
@@ -30,7 +57,7 @@ proxy:
 
 # === 上游 API ===
 upstream:
-  # 默认上游 API 地址
-  base_url: "https://api.deepseek.com"
+  # 默认上游 API 地址（OpenCode Go 订阅的 OpenAI 兼容端点）
+  base_url: "https://opencode.ai/inference/go/openai/v1"
   # 超时秒数
   timeout_seconds: 120

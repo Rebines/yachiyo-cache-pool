@@ -16,6 +16,14 @@ import math
 import urllib.request
 import urllib.error
 
+# Windows 控制台/管道默认 GBK，CLI 输出 emoji 会触发 UnicodeEncodeError
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 # === Configuration (从 config.yaml 加载) ===
 def load_config():
     """Load config from config.yaml or return defaults."""
@@ -27,8 +35,17 @@ def load_config():
         "embedding": {
             "backend": "llama-server",
             "llama_url": "http://localhost:8080/v1/embeddings",
+            "llama_model": "embeddinggemma",
+            "accelerator": "auto",
+            "cuda_build": "auto",
             "ollama_url": "http://localhost:11434/api/embeddings",
-            "ollama_model": "embeddinggemma:300m-qat-q4_0"
+            "ollama_model": "embeddinggemma:300m-qat-q4_0",
+            # 自定义 GGUF：model_path（本地）优先于 hf_repo（HuggingFace）
+            "model_path": "",
+            "hf_repo": "",
+            "hf_file": "",
+            "pooling": "auto",
+            "embd_normalize": 2
         },
         "cache": {
             "similarity_threshold": 0.92,
@@ -80,11 +97,37 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(SCRIPT_DIR, "cache.db")
 OLLAMA_URL = _embed["ollama_url"]
 LLAMA_SERVER_URL = _embed["llama_url"]
+LLAMA_MODEL = _embed.get("llama_model") or "embeddinggemma"
 USE_LLAMA_SERVER_DIRECT = _embed["backend"] == "llama-server"
 EMBED_MODEL = _embed.get("ollama_model", "bge-m3")
 SIMILARITY_THRESHOLD = _cache["similarity_threshold"]
 DEFAULT_TTL = _cache["ttl_seconds"]
 MAX_RESULTS = 5
+
+# === Embedding 模型标识 ===
+# 换了 embedding 模型后，旧向量与新向量不可比较。语义搜索只比较同一模型生成的
+# 条目；老版本写入的条目没有 embedding_model 字段，按旧默认模型处理。
+LEGACY_EMBED_ID = "embeddinggemma-300M-Q8_0"
+LEGACY_OLLAMA_ID = "ollama:embeddinggemma:300m-qat-q4_0"
+LEGACY_ID = LEGACY_EMBED_ID if USE_LLAMA_SERVER_DIRECT else LEGACY_OLLAMA_ID
+
+def _resolve_embed_id() -> str:
+    model_path = str(_embed.get("model_path") or "").strip()
+    hf_repo = str(_embed.get("hf_repo") or "").strip()
+    if not USE_LLAMA_SERVER_DIRECT:
+        return f"ollama:{EMBED_MODEL}"
+    if model_path:
+        # 与 start-cache.sh 保持一致：相对路径按仓库根目录解析
+        model_path = os.path.expanduser(model_path)
+        if not os.path.isabs(model_path):
+            model_path = os.path.join(SCRIPT_DIR, model_path)
+        return os.path.abspath(model_path)
+    if hf_repo:
+        hf_file = str(_embed.get("hf_file") or "").strip()
+        return f"hf:{hf_repo}/{hf_file}" if hf_file else f"hf:{hf_repo}"
+    return LEGACY_EMBED_ID
+
+EMBED_ID = _resolve_embed_id()
 
 # === SQLite Setup ===
 def get_db():
@@ -134,7 +177,7 @@ def get_embedding(text: str) -> list:
         # llama.cpp server: /v1/embeddings (OpenAI-compatible)
         data = json.dumps({
             "input": text,
-            "model": "embeddinggemma"
+            "model": LLAMA_MODEL
         }).encode("utf-8")
         req = urllib.request.Request(
             LLAMA_SERVER_URL,
@@ -247,6 +290,10 @@ def search(query: str, model: str = "", threshold: float = SIMILARITY_THRESHOLD)
         
         for row in rows:
             try:
+                stored_meta = json.loads(row["metadata"]) if row["metadata"] else {}
+                # 旧向量来自别的 embedding 模型时跳过（老条目无字段 → 视为旧默认模型）
+                if stored_meta.get("embedding_model", LEGACY_ID) != EMBED_ID:
+                    continue
                 stored_emb = deserialize_embedding(row["embedding"])
                 score = cosine_similarity(query_emb, stored_emb)
                 
@@ -371,8 +418,12 @@ def store(query: str, response: str, model: str = "",
     try:
         h = exact_hash(query, model)
         now = time.time()
-        
+
         emb_bytes = serialize_embedding(embedding) if embedding else None
+        metadata = dict(metadata or {})
+        if embedding:
+            # 记录向量来源模型，换模型后语义搜索不会误用旧向量
+            metadata["embedding_model"] = EMBED_ID
         
         # Check if exact hash already exists
         existing = db.execute(
@@ -450,7 +501,7 @@ def stats() -> dict:
             "oldest_entry": oldest,
             "newest_entry": newest,
             "db_path": DB_PATH,
-            "embed_model": "llama.cpp Q8_0" if USE_LLAMA_SERVER_DIRECT else EMBED_MODEL,
+            "embed_model": EMBED_ID if USE_LLAMA_SERVER_DIRECT else EMBED_MODEL,
             "similarity_threshold": SIMILARITY_THRESHOLD,
             "tool_cache_entries": tool_total,
             "tool_cache_active": tool_total - tool_expired,

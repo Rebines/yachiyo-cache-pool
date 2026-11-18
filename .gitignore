@@ -9,3 +9,4 @@ models/*.bin
 *.db
 __pycache__/
 *.db
+.opencode-go-key
